@@ -35,38 +35,31 @@ jobs:
     runs-on: ${{ matrix.config.os }}
 
     steps:
-      # ── Checkout ────────────────────────────────────────────────────────────
+      # ── Checkout ──────────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Geode CLI (handles SDK + toolchain setup automatically) ─────────────
+      # ── Geode CLI ─────────────────────────────────────────────────────────────
       - name: Setup Geode CLI
         uses: geode-sdk/cli/.github/actions/setup@main
         with:
-          # Pins to the latest stable CLI; bump this when a new CLI ships
-          cli-version: latest
+          version: latest
 
-      # ── Configure & Build ───────────────────────────────────────────────────
-      - name: Configure CMake
-        run: geode build configure -- -DCMAKE_BUILD_TYPE=Release
-        env:
-          GEODE_TARGET: ${{ matrix.config.target }}
-
+      # ── Build ─────────────────────────────────────────────────────────────────
       - name: Build
-        run: geode build
+        run: geode build -- -DCMAKE_BUILD_TYPE=Release
         env:
           GEODE_TARGET: ${{ matrix.config.target }}
 
-      # ── Upload artifact (.geode file) ────────────────────────────────────────
+      # ── Upload .geode artifact ─────────────────────────────────────────────────
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.config.name }}-build
-          # The CLI places the .geode file here after a successful build
           path: build/*.geode
           if-no-files-found: error
 
-  # ── Release job: runs only when a tag is pushed ────────────────────────────
+  # ── Release: only on version tags ─────────────────────────────────────────────
   release:
     name: Publish Release
     needs: build
@@ -74,14 +67,14 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write   # needed to create a GitHub Release
+      contents: write
 
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true   # flatten into a single directory
+          merge-multiple: true
 
       - name: List artifacts (debug)
         run: ls -R artifacts/
