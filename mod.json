@@ -1,15 +1,10 @@
 {
     "geode": "4.0.0",
-    "gd": {
-        "win": "2.2074",
-        "android": "2.2074",
-        "mac": "2.2074",
-        "ios": "2.2074"
-    },
+    "gd": "2.208",
     "id": "yourname.song-unlocker",
     "name": "Song Unlocker",
     "version": "v1.0.0",
-    "developer": "YourName",
+    "developers": ["YourName"],
     "description": "Allows using songs from non-whitelisted Newgrounds artists in your levels.",
     "links": {
         "source": "https://github.com/yourname/song-unlocker"
