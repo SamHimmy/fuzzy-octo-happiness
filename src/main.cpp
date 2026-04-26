@@ -13,7 +13,7 @@ using namespace geode::prelude;
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
     struct Fields {
-        std::unordered_map<int, EventListener<Task<web::WebResponse, web::WebProgress>>> m_ngListeners;
+        std::unordered_map<int, geode::EventListener<geode::Task<geode::utils::web::WebResponse, geode::utils::web::WebProgress>>> m_ngListeners;
     };
 
     bool isVerifiedSong(int songID)                  { return true; }
