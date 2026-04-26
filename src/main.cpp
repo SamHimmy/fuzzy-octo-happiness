@@ -8,78 +8,61 @@
 using namespace geode::prelude;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Parse the NG audio/load JSON and build a SongInfoObject
-SongInfoObject* songInfoFromNG(int songID, matjson::Value const& json) {
-    auto* obj = SongInfoObject::create(
-        /*songID*/     songID,
-        /*songName*/   json["title"].asString().unwrapOr("Unknown"),
-        /*artistName*/ json["author"].asString().unwrapOr("Unknown"),
-        /*fileSize*/   0.f,
-        /*youtubeURL*/ "",
-        /*songURL*/    json["url"].asString().unwrapOr(""),
-        /*isVerified*/ true,
-        /*isRobtop*/   false
-    );
-    return obj;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    // Always report every song as verified locally
+    // One EventListener per pending NG request, keyed by songID
+    struct Fields {
+        std::unordered_map<int, EventListener<web::WebTask>> m_ngListeners;
+    };
+
     bool isVerifiedSong(int songID) { return true; }
     bool isSongVerified(int songID, bool includeLocal) { return true; }
     bool isMusicAllowed(int songID) { return true; }
 
-    // Intercept song info fetching
     void getSongInfo(int songID, bool isRobtop) {
-        // Let normal path run — it may succeed for whitelisted songs
+        // Always run the normal path (works for whitelisted songs)
         SongUnlockerMDM::getSongInfo(songID, isRobtop);
 
-        // Simultaneously fire a direct Newgrounds request as a fallback.
-        // If the boomlings server already responded fine, the result here
-        // will be a no-op because the song will already be cached.
-        if (!isRobtop) {
-            auto url = fmt::format(
-                "https://www.newgrounds.com/audio/load/{}",
-                songID
-            );
+        // Fire a parallel direct NG request for custom songs
+        if (isRobtop) return;
 
-            auto req = web::WebRequest();
-            req.header("Accept", "application/json");
+        auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
 
-            auto task = req.get(url);
-            task.listen([this, songID](web::WebResponse* res) {
-                if (!res || !res->ok()) return;
+        auto& listener = m_fields->m_ngListeners[songID];
+        listener.bind([this, songID](web::WebTask::Event* e) {
+            auto* res = e->getValue();
+            if (!res || !res->ok()) return;
 
-                // If the song is already loaded, don't overwrite it
-                if (this->getSongInfoObject(songID)) return;
+            // Don't overwrite if boomlings already resolved it
+            if (this->getSongInfoObject(songID)) return;
 
-                auto jsonResult = res->json();
-                if (jsonResult.isErr()) return;
-                auto json = jsonResult.unwrap();
+            auto jsonResult = res->json();
+            if (jsonResult.isErr()) return;
+            auto const& json = jsonResult.unwrap();
 
-                // Build and register the song object
-                if (auto* songObj = songInfoFromNG(songID, json)) {
-                    songObj->m_verified = true;
-                    // Dispatch to any waiting delegates
-                    this->addSongInfoObject(songObj);
-                    this->onGetSongInfoCompleted(
-                        fmt::format("{}", songID), "1"
-                    );
-                }
-            });
-        }
+            // Use the single-arg overload, then fill fields manually
+            auto* songObj = SongInfoObject::create(songID);
+            if (!songObj) return;
+
+            songObj->m_songName    = json["title"].asString().unwrapOr("Unknown Song");
+            songObj->m_artistName  = json["author"].asString().unwrapOr("Unknown Artist");
+            songObj->m_downloadURL = json["url"].asString().unwrapOr("");
+            songObj->m_verified    = true;
+
+            // Register in the song dictionary so getSongInfoObject() finds it
+            this->m_songs->setObject(songObj, fmt::format("{}", songID));
+
+            // Tell any waiting UI that the song info arrived
+            this->onGetSongInfoCompleted(fmt::format("{}", songID), "1");
+        });
+        listener.setFilter(web::WebRequest().get(url));
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hook: CustomSongWidget — suppress the warning UI
+// Hook: CustomSongWidget — suppress the "not whitelisted" warning banner
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(CustomSongWidget) {
 
@@ -105,7 +88,7 @@ class $modify(LevelEditorLayer) {
     bool init(GJGameLevel* level, bool unk) {
         if (level && level->m_songID != 0) {
             auto mdm = MusicDownloadManager::sharedState();
-            if (auto song = mdm->getSongInfoObject(level->m_songID))
+            if (auto* song = mdm->getSongInfoObject(level->m_songID))
                 song->m_verified = true;
         }
         return LevelEditorLayer::init(level, unk);
@@ -120,7 +103,7 @@ class $modify(EditLevelLayer) {
     bool init(GJGameLevel* level) {
         if (level && level->m_songID != 0) {
             auto mdm = MusicDownloadManager::sharedState();
-            if (auto song = mdm->getSongInfoObject(level->m_songID))
+            if (auto* song = mdm->getSongInfoObject(level->m_songID))
                 song->m_verified = true;
         }
         return EditLevelLayer::init(level);
@@ -128,5 +111,5 @@ class $modify(EditLevelLayer) {
 };
 
 $on_mod(Loaded) {
-    log::info("Song Unlocker loaded — fetching non-whitelisted songs via NG API.");
+    log::info("Song Unlocker loaded.");
 }
