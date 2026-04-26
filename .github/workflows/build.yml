@@ -44,7 +44,7 @@ jobs:
           version: latest
 
       - name: Install Geode SDK
-        run: geode sdk install --path ${{ runner.temp }}/geode-sdk --confirm
+        run: geode sdk install "${{ runner.temp }}/geode-sdk" --confirm
 
       - name: Build
         run: geode build -- -DCMAKE_BUILD_TYPE=Release
