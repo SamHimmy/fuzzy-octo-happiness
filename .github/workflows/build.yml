@@ -35,23 +35,23 @@ jobs:
     runs-on: ${{ matrix.config.os }}
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Geode CLI ─────────────────────────────────────────────────────────────
       - name: Setup Geode CLI
         uses: geode-sdk/cli/.github/actions/setup@main
         with:
           version: latest
 
-      # ── Build ─────────────────────────────────────────────────────────────────
+      - name: Install Geode SDK
+        run: geode sdk install --path ${{ runner.temp }}/geode-sdk --confirm
+
       - name: Build
         run: geode build -- -DCMAKE_BUILD_TYPE=Release
         env:
           GEODE_TARGET: ${{ matrix.config.target }}
+          GEODE_SDK: ${{ runner.temp }}/geode-sdk
 
-      # ── Upload .geode artifact ─────────────────────────────────────────────────
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -59,7 +59,6 @@ jobs:
           path: build/*.geode
           if-no-files-found: error
 
-  # ── Release: only on version tags ─────────────────────────────────────────────
   release:
     name: Publish Release
     needs: build
@@ -75,9 +74,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: List artifacts (debug)
-        run: ls -R artifacts/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
