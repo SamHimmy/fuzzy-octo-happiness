@@ -1,6 +1,11 @@
 {
     "geode": "5.6.1",
-    "gd": "2.208",
+    "gd": {
+        "win": "2.208",
+        "mac": "2.208",
+        "android": "2.208",
+        "ios": "2.208"
+    },
     "id": "yourname.song-unlocker",
     "name": "Song Unlocker",
     "version": "v1.0.0",
