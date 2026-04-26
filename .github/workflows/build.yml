@@ -1,13 +1,10 @@
-name: Build Mod
+name: Build Geode Mod
 
 on:
-  push:
-    branches: [main, master]
-    tags:
-      - "v*"
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
+  push:
+    branches:
+      - '**'
 
 jobs:
   build:
@@ -15,70 +12,43 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          - name: Windows
-            os: windows-latest
-            target: win
+        - name: Windows
+          os: windows-latest
 
-          - name: macOS
-            os: macos-latest
-            target: mac
+        - name: macOS
+          os: macos-latest
 
-          - name: Android (arm64)
-            os: ubuntu-latest
-            target: android64
+        - name: Android32
+          os: ubuntu-latest
+          target: Android32
 
-          - name: Android (arm32)
-            os: ubuntu-latest
-            target: android32
+        - name: Android64
+          os: ubuntu-latest
+          target: Android64
 
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Setup Geode CLI
-        uses: geode-sdk/cli/.github/actions/setup@main
+      - name: Build the mod
+        uses: geode-sdk/build-geode-mod@main
         with:
-          version: latest
-
-      - name: Install Geode SDK
-        run: geode sdk install "${{ runner.temp }}/geode-sdk"
-
-      - name: Build
-        run: geode build -- -DCMAKE_BUILD_TYPE=Release
-        env:
-          GEODE_TARGET: ${{ matrix.config.target }}
-          GEODE_SDK: ${{ runner.temp }}/geode-sdk
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.config.name }}-build
-          path: build/*.geode
-          if-no-files-found: error
-
-  release:
-    name: Publish Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+          combine: true
+          sdk: nightly
+          target: ${{ matrix.config.target }}
+      
+  package:
+    name: Package builds
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
+    needs: ['build']
 
     steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
+      - uses: geode-sdk/build-geode-mod@combine
+        id: build
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v3
         with:
-          files: artifacts/*.geode
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          name: Build Output
+          path: ${{ steps.build.outputs.build-output }}
