@@ -4,8 +4,14 @@
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/modify/EditLevelLayer.hpp>
 #include <Geode/utils/web.hpp>
+#include <Geode/loader/Event.hpp>
 
 using namespace geode::prelude;
+
+// Typedef defined at file scope (outside any macro-generated class) so it is
+// available inside struct Fields where 'using namespace geode::prelude' does
+// NOT apply.
+using NGWebTask = Task<web::WebResponse, web::WebProgress>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
@@ -13,28 +19,25 @@ using namespace geode::prelude;
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
     struct Fields {
-        std::unordered_map<int, geode::EventListener<geode::Task<geode::utils::web::WebResponse, geode::utils::web::WebProgress>>> m_ngListeners;
+        std::unordered_map<int, EventListener<NGWebTask> > m_ngListeners;
     };
 
-    bool isVerifiedSong(int songID)                  { return true; }
-    bool isSongVerified(int songID, bool includeLocal){ return true; }
-    bool isMusicAllowed(int songID)                  { return true; }
+    bool isVerifiedSong(int songID)                    { return true; }
+    bool isSongVerified(int songID, bool includeLocal) { return true; }
+    bool isMusicAllowed(int songID)                    { return true; }
 
     void getSongInfo(int songID, bool isRobtop) {
-        // Always attempt normal path (whitelisted songs still go through boomlings)
         SongUnlockerMDM::getSongInfo(songID, isRobtop);
 
         if (isRobtop) return;
 
-        // Parallel direct-NG fetch as fallback
         auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
 
         auto& listener = m_fields->m_ngListeners[songID];
-        listener.bind([this, songID](Task<web::WebResponse, web::WebProgress>::Event* e) {
+        listener.bind([this, songID](NGWebTask::Event* e) {
             auto* res = e->getValue();
             if (!res || !res->ok()) return;
 
-            // Boomlings already resolved it — nothing to do
             if (this->getSongInfoObject(songID)) return;
 
             auto jsonResult = res->json();
@@ -45,34 +48,18 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
             auto artist = json["author"].asString().unwrapOr("Unknown Artist");
             auto dlUrl  = json["url"].asString().unwrapOr("");
 
-            // Build a SongInfoObject with the full 14-arg create so every
-            // field is initialised correctly from the start
             auto* songObj = SongInfoObject::create(
-                songID,          // songID
-                title,           // songName
-                artist,          // artistName
-                0,               // artistID
-                0.f,             // filesize
-                "",              // youtubeVideo
-                "",              // youtubeChannel
-                dlUrl,           // url
-                "",              // unknown
-                0,               // nongType
-                "",              // extraArtistIDs
-                false,           // isNew
-                0,               // libraryOrder
-                0                // priority
+                songID, title, artist,
+                0, 0.f, "", "", dlUrl, "", 0, "", false, 0, 0
             );
             if (!songObj) return;
             songObj->m_verified = true;
 
-            // Store in the manager's song object cache
             this->m_songObjects->setObject(
                 songObj,
                 cocos2d::CCString::createWithFormat("%i", songID)->getCString()
             );
 
-            // Notify any waiting UI (CustomSongWidget etc.)
             this->onGetSongInfoCompleted(
                 cocos2d::CCString::createWithFormat("%i", songID)->getCString(),
                 "1"
@@ -83,7 +70,7 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hook: CustomSongWidget — hide the "not whitelisted" warning
+// Hook: CustomSongWidget
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(CustomSongWidget) {
 
