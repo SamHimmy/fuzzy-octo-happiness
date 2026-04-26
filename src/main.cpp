@@ -13,7 +13,7 @@ using namespace geode::prelude;
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
     struct Fields {
-        std::unordered_map<int, EventListener<web::WebTask>> m_ngListeners;
+        std::unordered_map<int, EventListener<WebTask>> m_ngListeners;
     };
 
     bool isVerifiedSong(int songID)                  { return true; }
@@ -30,7 +30,7 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
         auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
 
         auto& listener = m_fields->m_ngListeners[songID];
-        listener.bind([this, songID](web::WebTask::Event* e) {
+        listener.bind([this, songID](WebTask::Event* e) {
             auto* res = e->getValue();
             if (!res || !res->ok()) return;
 
@@ -78,7 +78,7 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
                 "1"
             );
         });
-        listener.setFilter(web::WebRequest().get(url));
+        listener.setFilter(WebRequest().get(url));
     }
 };
 
