@@ -1,0 +1,95 @@
+name: Build Mod
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: Windows
+            os: windows-latest
+            target: win
+
+          - name: macOS
+            os: macos-latest
+            target: mac
+
+          - name: Android (arm64)
+            os: ubuntu-latest
+            target: android64
+
+          - name: Android (arm32)
+            os: ubuntu-latest
+            target: android32
+
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Geode CLI (handles SDK + toolchain setup automatically) ─────────────
+      - name: Setup Geode CLI
+        uses: geode-sdk/cli/.github/actions/setup@main
+        with:
+          # Pins to the latest stable CLI; bump this when a new CLI ships
+          cli-version: latest
+
+      # ── Configure & Build ───────────────────────────────────────────────────
+      - name: Configure CMake
+        run: geode build configure -- -DCMAKE_BUILD_TYPE=Release
+        env:
+          GEODE_TARGET: ${{ matrix.config.target }}
+
+      - name: Build
+        run: geode build
+        env:
+          GEODE_TARGET: ${{ matrix.config.target }}
+
+      # ── Upload artifact (.geode file) ────────────────────────────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.config.name }}-build
+          # The CLI places the .geode file here after a successful build
+          path: build/*.geode
+          if-no-files-found: error
+
+  # ── Release job: runs only when a tag is pushed ────────────────────────────
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # needed to create a GitHub Release
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true   # flatten into a single directory
+
+      - name: List artifacts (debug)
+        run: ls -R artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.geode
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
