@@ -1,6 +1,6 @@
 #include <Geode/Geode.hpp>
 #include <Geode/utils/web.hpp>
-#include <Geode/loader/Event.hpp>
+#include <Geode/utils/async.hpp>
 #include <Geode/modify/MusicDownloadManager.hpp>
 #include <Geode/modify/CustomSongWidget.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
@@ -12,13 +12,12 @@ static std::unordered_map<int, Ref<SongInfoObject>> s_ngSongCache;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
-// Using the exact Fields + EventListener<web::WebTask> pattern from the docs
+// Using Geode 5.x async::TaskHolder API (WebTask was removed in v5)
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    // Docs pattern: EventListener<web::WebTask> inside Fields
     struct Fields {
-        EventListener<web::WebTask> m_listener;
+        async::TaskHolder<web::WebResponse> m_listener;
     };
 
     bool isVerifiedSong(int songID)                    { return true; }
@@ -39,14 +38,15 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
         if (isRobtop) return;
 
         auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
+        auto req  = web::WebRequest();
 
-        // Docs pattern: bind then setFilter
-        m_fields->m_listener.bind([this, songID](web::WebTask::Event* e) {
-            if (auto* res = e->getValue()) {
-                if (!res->ok()) return;
+        m_fields->m_listener.spawn(
+            req.get(url),
+            [this, songID](web::WebResponse res) {
+                if (!res.ok()) return;
                 if (MusicDownloadManager::getSongInfoObject(songID)) return;
 
-                auto jsonResult = res->json();
+                auto jsonResult = res.json();
                 if (jsonResult.isErr()) return;
                 auto const& json = jsonResult.unwrap();
 
@@ -68,10 +68,7 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
                     "1"
                 );
             }
-        });
-
-        auto req = web::WebRequest();
-        m_fields->m_listener.setFilter(req.get(url));
+        );
     }
 };
 
