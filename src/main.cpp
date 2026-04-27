@@ -1,6 +1,6 @@
 #include <Geode/Geode.hpp>
-#include <Geode/loader/Event.hpp>
 #include <Geode/utils/web.hpp>
+#include <Geode/loader/Event.hpp>
 #include <Geode/modify/MusicDownloadManager.hpp>
 #include <Geode/modify/CustomSongWidget.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
@@ -8,14 +8,18 @@
 
 using namespace geode::prelude;
 
-// All statics at file scope — 'using namespace geode::prelude' IS in scope here
 static std::unordered_map<int, Ref<SongInfoObject>> s_ngSongCache;
-static std::unordered_map<int, EventListener<Task<web::WebResponse, web::WebProgress>>> s_ngListeners;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
+// Using the exact Fields + EventListener<web::WebTask> pattern from the docs
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
+
+    // Docs pattern: EventListener<web::WebTask> inside Fields
+    struct Fields {
+        EventListener<web::WebTask> m_listener;
+    };
 
     bool isVerifiedSong(int songID)                    { return true; }
     bool isSongVerified(int songID, bool includeLocal) { return true; }
@@ -36,35 +40,38 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
         auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
 
-        auto& listener = s_ngListeners[songID];
-        listener.bind([this, songID](Task<web::WebResponse, web::WebProgress>::Event* e) {
-            auto* res = e->getValue();
-            if (!res || !res->ok()) return;
-            if (MusicDownloadManager::getSongInfoObject(songID)) return;
+        // Docs pattern: bind then setFilter
+        m_fields->m_listener.bind([this, songID](web::WebTask::Event* e) {
+            if (auto* res = e->getValue()) {
+                if (!res->ok()) return;
+                if (MusicDownloadManager::getSongInfoObject(songID)) return;
 
-            auto jsonResult = res->json();
-            if (jsonResult.isErr()) return;
-            auto const& json = jsonResult.unwrap();
+                auto jsonResult = res->json();
+                if (jsonResult.isErr()) return;
+                auto const& json = jsonResult.unwrap();
 
-            auto title  = json["title"].asString().unwrapOr("Unknown Song");
-            auto artist = json["author"].asString().unwrapOr("Unknown Artist");
-            auto dlUrl  = json["url"].asString().unwrapOr("");
+                auto title  = json["title"].asString().unwrapOr("Unknown Song");
+                auto artist = json["author"].asString().unwrapOr("Unknown Artist");
+                auto dlUrl  = json["url"].asString().unwrapOr("");
 
-            auto* songObj = SongInfoObject::create(
-                songID, title, artist,
-                0, 0.f, "", "", dlUrl, "", 0, "", false, 0, 0
-            );
-            if (!songObj) return;
-            songObj->m_verified = true;
+                auto* songObj = SongInfoObject::create(
+                    songID, title, artist,
+                    0, 0.f, "", "", dlUrl, "", 0, "", false, 0, 0
+                );
+                if (!songObj) return;
+                songObj->m_verified = true;
 
-            s_ngSongCache[songID] = songObj;
+                s_ngSongCache[songID] = songObj;
 
-            this->onGetSongInfoCompleted(
-                cocos2d::CCString::createWithFormat("%i", songID)->getCString(),
-                "1"
-            );
+                this->onGetSongInfoCompleted(
+                    cocos2d::CCString::createWithFormat("%i", songID)->getCString(),
+                    "1"
+                );
+            }
         });
-        listener.setFilter(web::WebRequest().get(url));
+
+        auto req = web::WebRequest();
+        m_fields->m_listener.setFilter(req.get(url));
     }
 };
 
