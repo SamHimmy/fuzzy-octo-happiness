@@ -8,30 +8,19 @@
 
 using namespace geode::prelude;
 
-// Static NG song cache — avoids touching unknown MDM internals
+// All statics at file scope — 'using namespace geode::prelude' IS in scope here
 static std::unordered_map<int, Ref<SongInfoObject>> s_ngSongCache;
+static std::unordered_map<int, EventListener<Task<web::WebResponse, web::WebProgress>>> s_ngListeners;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    struct Fields {
-        // Fully-qualified — 'using namespace geode::prelude' is NOT in scope here
-        std::unordered_map<
-            int,
-            geode::EventListener<
-                geode::Task<web::WebResponse, web::WebProgress>
-            >
-        > m_ngListeners;
-    };
-
-    // ── Whitelist bypass ─────────────────────────────────────────────────────
     bool isVerifiedSong(int songID)                    { return true; }
     bool isSongVerified(int songID, bool includeLocal) { return true; }
     bool isMusicAllowed(int songID)                    { return true; }
 
-    // ── Serve from our NG cache if GD's own cache misses ────────────────────
     SongInfoObject* getSongInfoObject(int songID) {
         if (auto* obj = MusicDownloadManager::getSongInfoObject(songID))
             return obj;
@@ -41,21 +30,16 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
         return nullptr;
     }
 
-    // ── Fire parallel NG fetch for every non-robtop song ────────────────────
     void getSongInfo(int songID, bool isRobtop) {
         SongUnlockerMDM::getSongInfo(songID, isRobtop);
         if (isRobtop) return;
 
-        using Task_t = geode::Task<web::WebResponse, web::WebProgress>;
-
         auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
-        auto& listener = m_fields->m_ngListeners[songID];
 
-        listener.bind([this, songID](Task_t::Event* e) {
+        auto& listener = s_ngListeners[songID];
+        listener.bind([this, songID](Task<web::WebResponse, web::WebProgress>::Event* e) {
             auto* res = e->getValue();
             if (!res || !res->ok()) return;
-
-            // Boomlings already resolved it — skip
             if (MusicDownloadManager::getSongInfoObject(songID)) return;
 
             auto jsonResult = res->json();
@@ -68,17 +52,7 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
             auto* songObj = SongInfoObject::create(
                 songID, title, artist,
-                0,      // artistID
-                0.f,    // filesize
-                "",     // youtubeVideo
-                "",     // youtubeChannel
-                dlUrl,  // url
-                "",     // unknown
-                0,      // nongType
-                "",     // extraArtistIDs
-                false,  // isNew
-                0,      // libraryOrder
-                0       // priority
+                0, 0.f, "", "", dlUrl, "", 0, "", false, 0, 0
             );
             if (!songObj) return;
             songObj->m_verified = true;
@@ -90,7 +64,6 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
                 "1"
             );
         });
-
         listener.setFilter(web::WebRequest().get(url));
     }
 };
@@ -104,9 +77,8 @@ class $modify(CustomSongWidget) {
               bool isRobtopSong, bool unkBool, bool isMusicLibrary, int unk) {
         if (songInfo) songInfo->m_verified = true;
         return CustomSongWidget::init(
-            songInfo, delegate,
-            showSongSelect, showPlayMusic, showUseButton,
-            isRobtopSong, unkBool, isMusicLibrary, unk
+            songInfo, delegate, showSongSelect, showPlayMusic,
+            showUseButton, isRobtopSong, unkBool, isMusicLibrary, unk
         );
     }
 };
