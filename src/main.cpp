@@ -1,14 +1,15 @@
 #include <Geode/Geode.hpp>
+#include <Geode/loader/Event.hpp>
+#include <Geode/utils/web.hpp>
 #include <Geode/modify/MusicDownloadManager.hpp>
 #include <Geode/modify/CustomSongWidget.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/modify/EditLevelLayer.hpp>
-#include <Geode/utils/web.hpp>
 
 using namespace geode::prelude;
 
-// Convenience alias — Geode 5.x has no web::WebTask typedef
-using WebTask = Task<web::WebResponse, web::WebProgress>;
+// Static NG song cache — avoids touching unknown MDM internals
+static std::unordered_map<int, Ref<SongInfoObject>> s_ngSongCache;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
@@ -16,29 +17,46 @@ using WebTask = Task<web::WebResponse, web::WebProgress>;
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
     struct Fields {
-        std::unordered_map<int, EventListener<WebTask>> m_ngListeners;
+        // Fully-qualified — 'using namespace geode::prelude' is NOT in scope here
+        std::unordered_map<
+            int,
+            geode::EventListener<
+                geode::Task<web::WebResponse, web::WebProgress>
+            >
+        > m_ngListeners;
     };
 
-    bool isVerifiedSong(int songID)                  { return true; }
-    bool isSongVerified(int songID, bool includeLocal){ return true; }
-    bool isMusicAllowed(int songID)                  { return true; }
+    // ── Whitelist bypass ─────────────────────────────────────────────────────
+    bool isVerifiedSong(int songID)                    { return true; }
+    bool isSongVerified(int songID, bool includeLocal) { return true; }
+    bool isMusicAllowed(int songID)                    { return true; }
 
+    // ── Serve from our NG cache if GD's own cache misses ────────────────────
+    SongInfoObject* getSongInfoObject(int songID) {
+        if (auto* obj = MusicDownloadManager::getSongInfoObject(songID))
+            return obj;
+        auto it = s_ngSongCache.find(songID);
+        if (it != s_ngSongCache.end())
+            return it->second.data();
+        return nullptr;
+    }
+
+    // ── Fire parallel NG fetch for every non-robtop song ────────────────────
     void getSongInfo(int songID, bool isRobtop) {
-        // Always attempt normal path (whitelisted songs still go through boomlings)
         SongUnlockerMDM::getSongInfo(songID, isRobtop);
-
         if (isRobtop) return;
 
-        // Parallel direct-NG fetch as fallback
-        auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
+        using Task_t = geode::Task<web::WebResponse, web::WebProgress>;
 
+        auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
         auto& listener = m_fields->m_ngListeners[songID];
-        listener.bind([this, songID](WebTask::Event* e) {
+
+        listener.bind([this, songID](Task_t::Event* e) {
             auto* res = e->getValue();
             if (!res || !res->ok()) return;
 
-            // Boomlings already resolved it — nothing to do
-            if (this->getSongInfoObject(songID)) return;
+            // Boomlings already resolved it — skip
+            if (MusicDownloadManager::getSongInfoObject(songID)) return;
 
             auto jsonResult = res->json();
             if (jsonResult.isErr()) return;
@@ -48,54 +66,43 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
             auto artist = json["author"].asString().unwrapOr("Unknown Artist");
             auto dlUrl  = json["url"].asString().unwrapOr("");
 
-            // Build a SongInfoObject with the full 14-arg create so every
-            // field is initialised correctly from the start
             auto* songObj = SongInfoObject::create(
-                songID,          // songID
-                title,           // songName
-                artist,          // artistName
-                0,               // artistID
-                0.f,             // filesize
-                "",              // youtubeVideo
-                "",              // youtubeChannel
-                dlUrl,           // url
-                "",              // unknown
-                0,               // nongType
-                "",              // extraArtistIDs
-                false,           // isNew
-                0,               // libraryOrder
-                0                // priority
+                songID, title, artist,
+                0,      // artistID
+                0.f,    // filesize
+                "",     // youtubeVideo
+                "",     // youtubeChannel
+                dlUrl,  // url
+                "",     // unknown
+                0,      // nongType
+                "",     // extraArtistIDs
+                false,  // isNew
+                0,      // libraryOrder
+                0       // priority
             );
             if (!songObj) return;
             songObj->m_verified = true;
 
-            // Store in the manager's song object cache
-            this->m_songObjects->setObject(
-                songObj,
-                cocos2d::CCString::createWithFormat("%i", songID)->getCString()
-            );
+            s_ngSongCache[songID] = songObj;
 
-            // Notify any waiting UI (CustomSongWidget etc.)
             this->onGetSongInfoCompleted(
                 cocos2d::CCString::createWithFormat("%i", songID)->getCString(),
                 "1"
             );
         });
+
         listener.setFilter(web::WebRequest().get(url));
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hook: CustomSongWidget — hide the "not whitelisted" warning
+// Hook: CustomSongWidget
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(CustomSongWidget) {
-
     bool init(SongInfoObject* songInfo, CustomSongDelegate* delegate,
               bool showSongSelect, bool showPlayMusic, bool showUseButton,
               bool isRobtopSong, bool unkBool, bool isMusicLibrary, int unk) {
-
         if (songInfo) songInfo->m_verified = true;
-
         return CustomSongWidget::init(
             songInfo, delegate,
             showSongSelect, showPlayMusic, showUseButton,
@@ -110,7 +117,7 @@ class $modify(CustomSongWidget) {
 class $modify(LevelEditorLayer) {
     bool init(GJGameLevel* level, bool unk) {
         if (level && level->m_songID != 0) {
-            auto mdm = MusicDownloadManager::sharedState();
+            auto* mdm = MusicDownloadManager::sharedState();
             if (auto* song = mdm->getSongInfoObject(level->m_songID))
                 song->m_verified = true;
         }
@@ -124,7 +131,7 @@ class $modify(LevelEditorLayer) {
 class $modify(EditLevelLayer) {
     bool init(GJGameLevel* level) {
         if (level && level->m_songID != 0) {
-            auto mdm = MusicDownloadManager::sharedState();
+            auto* mdm = MusicDownloadManager::sharedState();
             if (auto* song = mdm->getSongInfoObject(level->m_songID))
                 song->m_verified = true;
         }
