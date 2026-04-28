@@ -1,79 +1,90 @@
 #include <Geode/Geode.hpp>
 #include <Geode/utils/web.hpp>
-#include <Geode/utils/async.hpp>
 #include <Geode/modify/MusicDownloadManager.hpp>
 #include <Geode/modify/CustomSongWidget.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/modify/EditLevelLayer.hpp>
+#include <thread>
 
 using namespace geode::prelude;
 
-static std::unordered_map<int, Ref<SongInfoObject>> s_ngSongCache;
+// ─────────────────────────────────────────────────────────────────────────────
+// Fetch song info from Newgrounds and feed it back through GD's own parser.
+// Must only be called from a background thread.
+// ─────────────────────────────────────────────────────────────────────────────
+static void fetchFromNG(int songID) {
+    // Build a minimal HTTP GET — no Geode async, just synchronous curl via web::WebRequest
+    // web::WebRequest::send() is synchronous when awaited synchronously
+    auto result = web::fetch(
+        fmt::format("https://www.newgrounds.com/audio/load/{}", songID)
+    );
+
+    Loader::get()->queueInMainThread([songID, result = std::move(result)]() {
+        auto* mdm = MusicDownloadManager::sharedState();
+        std::string capturedID = std::to_string(songID);
+
+        if (result.isErr()) {
+            // Let GD show its normal error
+            mdm->onGetSongInfoCompleted(capturedID, "-1");
+            return;
+        }
+
+        auto const& body = result.unwrap();
+        auto jsonResult  = matjson::parse(body);
+        if (jsonResult.isErr()) {
+            mdm->onGetSongInfoCompleted(capturedID, "-1");
+            return;
+        }
+
+        auto const& json = jsonResult.unwrap();
+        auto title  = json["title"].asString().unwrapOr("Unknown Song");
+        auto artist = json["author"].asString().unwrapOr("Unknown Artist");
+        auto dlUrl  = json["url"].asString().unwrapOr("");
+
+        // Craft a boomlings-style response that GD's own parser understands
+        auto fakeResponse = fmt::format(
+            "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~6~|~~|~7~|~~|~10~|~{}",
+            songID, title, artist, dlUrl
+        );
+
+        mdm->onGetSongInfoCompleted(capturedID, fakeResponse);
+    });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
-// Using Geode 5.x async::TaskHolder API (WebTask was removed in v5)
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    struct Fields {
-        async::TaskHolder<web::WebResponse> m_listener;
-    };
-
+    // ── Whitelist bypass ─────────────────────────────────────────────────────
     bool isVerifiedSong(int songID)                    { return true; }
     bool isSongVerified(int songID, bool includeLocal) { return true; }
     bool isMusicAllowed(int songID)                    { return true; }
 
-    SongInfoObject* getSongInfoObject(int songID) {
-        if (auto* obj = MusicDownloadManager::getSongInfoObject(songID))
-            return obj;
-        auto it = s_ngSongCache.find(songID);
-        if (it != s_ngSongCache.end())
-            return it->second.data();
-        return nullptr;
-    }
+    // ── Intercept boomlings failure response only ────────────────────────────
+    void onGetSongInfoCompleted(gd::string songIDStr, gd::string result) {
+        // Boomlings succeeded — let GD handle it normally, don't touch it
+        if (result != "-1" && !result.empty()) {
+            SongUnlockerMDM::onGetSongInfoCompleted(songIDStr, result);
+            return;
+        }
 
-    void getSongInfo(int songID, bool isRobtop) {
-        SongUnlockerMDM::getSongInfo(songID, isRobtop);
-        if (isRobtop) return;
+        int songID = 0;
+        try { songID = std::stoi(std::string(songIDStr)); }
+        catch (...) {
+            SongUnlockerMDM::onGetSongInfoCompleted(songIDStr, result);
+            return;
+        }
 
-        auto url = fmt::format("https://www.newgrounds.com/audio/load/{}", songID);
-        auto req  = web::WebRequest();
-
-        m_fields->m_listener.spawn(
-            req.get(url),
-            [this, songID](web::WebResponse res) {
-                if (!res.ok()) return;
-                if (MusicDownloadManager::getSongInfoObject(songID)) return;
-
-                auto jsonResult = res.json();
-                if (jsonResult.isErr()) return;
-                auto const& json = jsonResult.unwrap();
-
-                auto title  = json["title"].asString().unwrapOr("Unknown Song");
-                auto artist = json["author"].asString().unwrapOr("Unknown Artist");
-                auto dlUrl  = json["url"].asString().unwrapOr("");
-
-                auto* songObj = SongInfoObject::create(
-                    songID, title, artist,
-                    0, 0.f, "", "", dlUrl, "", 0, "", false, 0, 0
-                );
-                if (!songObj) return;
-                songObj->m_verified = true;
-
-                s_ngSongCache[songID] = songObj;
-
-                this->onGetSongInfoCompleted(
-                    cocos2d::CCString::createWithFormat("%i", songID)->getCString(),
-                    "1"
-                );
-            }
-        );
+        // Boomlings rejected it — fetch from NG on a background thread
+        std::thread([songID]() {
+            fetchFromNG(songID);
+        }).detach();
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hook: CustomSongWidget
+// Hook: CustomSongWidget — suppress the "not whitelisted" warning banner
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(CustomSongWidget) {
     bool init(SongInfoObject* songInfo, CustomSongDelegate* delegate,
