@@ -1,69 +1,30 @@
 #include <Geode/Geode.hpp>
 #include <Geode/utils/web.hpp>
+#include <Geode/utils/async.hpp>
 #include <Geode/modify/MusicDownloadManager.hpp>
 #include <Geode/modify/CustomSongWidget.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/modify/EditLevelLayer.hpp>
-#include <thread>
 
 using namespace geode::prelude;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Fetch song info from Newgrounds and feed it back through GD's own parser.
-// Must only be called from a background thread.
-// ─────────────────────────────────────────────────────────────────────────────
-static void fetchFromNG(int songID) {
-    // Build a minimal HTTP GET — no Geode async, just synchronous curl via web::WebRequest
-    // web::WebRequest::send() is synchronous when awaited synchronously
-    auto result = web::fetch(
-        fmt::format("https://www.newgrounds.com/audio/load/{}", songID)
-    );
-
-    Loader::get()->queueInMainThread([songID, result = std::move(result)]() {
-        auto* mdm = MusicDownloadManager::sharedState();
-        std::string capturedID = std::to_string(songID);
-
-        if (result.isErr()) {
-            // Let GD show its normal error
-            mdm->onGetSongInfoCompleted(capturedID, "-1");
-            return;
-        }
-
-        auto const& body = result.unwrap();
-        auto jsonResult  = matjson::parse(body);
-        if (jsonResult.isErr()) {
-            mdm->onGetSongInfoCompleted(capturedID, "-1");
-            return;
-        }
-
-        auto const& json = jsonResult.unwrap();
-        auto title  = json["title"].asString().unwrapOr("Unknown Song");
-        auto artist = json["author"].asString().unwrapOr("Unknown Artist");
-        auto dlUrl  = json["url"].asString().unwrapOr("");
-
-        // Craft a boomlings-style response that GD's own parser understands
-        auto fakeResponse = fmt::format(
-            "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~6~|~~|~7~|~~|~10~|~{}",
-            songID, title, artist, dlUrl
-        );
-
-        mdm->onGetSongInfoCompleted(capturedID, fakeResponse);
-    });
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    // ── Whitelist bypass ─────────────────────────────────────────────────────
+    struct Fields {
+        // Fully qualified — 'using namespace' does not apply inside Fields
+        geode::async::TaskHolder<geode::utils::web::WebResponse> m_ngTask;
+    };
+
     bool isVerifiedSong(int songID)                    { return true; }
     bool isSongVerified(int songID, bool includeLocal) { return true; }
     bool isMusicAllowed(int songID)                    { return true; }
 
-    // ── Intercept boomlings failure response only ────────────────────────────
+    // Only intercept when boomlings rejects (result == "-1")
+    // Whitelisted songs pass through completely untouched
     void onGetSongInfoCompleted(gd::string songIDStr, gd::string result) {
-        // Boomlings succeeded — let GD handle it normally, don't touch it
         if (result != "-1" && !result.empty()) {
             SongUnlockerMDM::onGetSongInfoCompleted(songIDStr, result);
             return;
@@ -76,15 +37,43 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
             return;
         }
 
-        // Boomlings rejected it — fetch from NG on a background thread
-        std::thread([songID]() {
-            fetchFromNG(songID);
-        }).detach();
+        auto capturedIDStr = std::string(songIDStr);
+
+        // Geode v5 async API — callback is called on main thread automatically
+        auto req = web::WebRequest();
+        m_fields->m_ngTask.spawn(
+            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID)),
+            [this, capturedIDStr, songID](web::WebResponse value) {
+                if (!value.ok()) {
+                    SongUnlockerMDM::onGetSongInfoCompleted(capturedIDStr, "-1");
+                    return;
+                }
+
+                auto jsonResult = value.json();
+                if (jsonResult.isErr()) {
+                    SongUnlockerMDM::onGetSongInfoCompleted(capturedIDStr, "-1");
+                    return;
+                }
+
+                auto const& json = jsonResult.unwrap();
+                auto title  = json["title"].asString().unwrapOr("Unknown Song");
+                auto artist = json["author"].asString().unwrapOr("Unknown Artist");
+                auto dlUrl  = json["url"].asString().unwrapOr("");
+
+                // Boomlings-format response — GD parses this natively
+                auto fakeResponse = fmt::format(
+                    "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~6~|~~|~7~|~~|~10~|~{}",
+                    songID, title, artist, dlUrl
+                );
+
+                SongUnlockerMDM::onGetSongInfoCompleted(capturedIDStr, fakeResponse);
+            }
+        );
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hook: CustomSongWidget — suppress the "not whitelisted" warning banner
+// Hook: CustomSongWidget
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(CustomSongWidget) {
     bool init(SongInfoObject* songInfo, CustomSongDelegate* delegate,
