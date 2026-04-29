@@ -12,18 +12,14 @@ using namespace geode::prelude;
 static std::unordered_set<int> s_ngInFlight;
 static std::unordered_set<int> s_ngDone;
 
-// File-scope aliases — 'using namespace geode::prelude' IS in scope here.
-// Using these inside Fields avoids all namespace resolution issues.
-using NGWebTask = Task<web::WebResponse, web::WebProgress>;
-using NGListener = EventListener<NGWebTask>;
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
+    // Exact pattern from docs: TaskHolder<web::WebResponse> in Fields
     struct Fields {
-        NGListener m_listener; // file-scope alias resolves cleanly here
+        async::TaskHolder<web::WebResponse> m_listener;
     };
 
     bool isVerifiedSong(int songID)                    { return true; }
@@ -31,25 +27,26 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
     bool isMusicAllowed(int songID)                    { return true; }
 
     void getSongInfo(int songID, bool isRobtop) {
-        // Always run boomlings path (whitelisted songs handled here)
         SongUnlockerMDM::getSongInfo(songID, isRobtop);
 
-        if (isRobtop)                    return;
-        if (s_ngDone.count(songID))      return;
-        if (s_ngInFlight.count(songID))  return;
+        if (isRobtop)                   return;
+        if (s_ngDone.count(songID))     return;
+        if (s_ngInFlight.count(songID)) return;
 
         s_ngInFlight.insert(songID);
 
-        // Docs pattern: bind() first, then setFilter()
-        m_fields->m_listener.bind([this, songID](NGWebTask::Event* e) {
-            if (web::WebResponse* res = e->getValue()) {
+        auto req = web::WebRequest();
+
+        // Exact pattern from docs: .spawn() with a callback
+        m_fields->m_listener.spawn(
+            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID)),
+            [this, songID](web::WebResponse res) {
                 s_ngInFlight.erase(songID);
 
-                if (!res->ok()) return;
-                // Boomlings already resolved it — skip
+                if (!res.ok()) return;
                 if (this->getSongInfoObject(songID)) return;
 
-                auto jsonResult = res->json();
+                auto jsonResult = res.json();
                 if (jsonResult.isErr()) return;
 
                 auto const& json = jsonResult.unwrap();
@@ -59,24 +56,13 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
                 s_ngDone.insert(songID);
 
-                // Feed a boomlings-format string into GD's OWN parser.
-                // We do NOT hook onGetSongInfoCompleted, so this goes straight
-                // to the original GD function — no vtable re-entry, no crash.
+                // Feed boomlings-format response into GD's own parser
                 auto fakeResponse = fmt::format(
                     "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~6~|~~|~7~|~~|~10~|~{}",
                     songID, title, artist, dlUrl
                 );
-                this->onGetSongInfoCompleted(
-                    std::to_string(songID), fakeResponse
-                );
-            } else if (e->isCancelled()) {
-                s_ngInFlight.erase(songID);
+                this->onGetSongInfoCompleted(std::to_string(songID), fakeResponse);
             }
-        });
-
-        auto req = web::WebRequest();
-        m_fields->m_listener.setFilter(
-            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID))
         );
     }
 };
