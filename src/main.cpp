@@ -1,3 +1,6 @@
+// Exact API from https://docs.geode-sdk.org/tutorials/fetch/
+// EventListener<web::WebTask> with .bind() then .setFilter()
+
 #include <Geode/Geode.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/loader/Event.hpp>
@@ -12,16 +15,31 @@ using namespace geode::prelude;
 static std::unordered_set<int> s_ngInFlight;
 static std::unordered_set<int> s_ngDone;
 
+// Percent-encode a URL so GD's parser handles it correctly
+static std::string urlEncode(std::string const& s) {
+    std::string out;
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' ||
+            c == ':' || c == '/' || c == '%' || c == '?' || c == '=') {
+            out += (char)c;
+        } else {
+            out += fmt::format("%{:02X}", c);
+        }
+    }
+    return out;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    // Exact pattern from docs: TaskHolder<web::WebResponse> in Fields
+    // Exact pattern from official docs
     struct Fields {
-        async::TaskHolder<web::WebResponse> m_listener;
+        EventListener<web::WebTask> m_listener;
     };
 
+    // ── Whitelist bypass ─────────────────────────────────────────────────────
     bool isVerifiedSong(int songID)                    { return true; }
     bool isSongVerified(int songID, bool includeLocal) { return true; }
     bool isMusicAllowed(int songID)                    { return true; }
@@ -35,34 +53,58 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
         s_ngInFlight.insert(songID);
 
-        auto req = web::WebRequest();
-
-        // Exact pattern from docs: .spawn() with a callback
-        m_fields->m_listener.spawn(
-            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID)),
-            [this, songID](web::WebResponse res) {
+        m_fields->m_listener.bind([this, songID](web::WebTask::Event* e) {
+            if (web::WebResponse* res = e->getValue()) {
                 s_ngInFlight.erase(songID);
 
-                if (!res.ok()) return;
+                if (!res->ok()) return;
                 if (this->getSongInfoObject(songID)) return;
 
-                auto jsonResult = res.json();
+                auto jsonResult = res->json();
                 if (jsonResult.isErr()) return;
 
                 auto const& json = jsonResult.unwrap();
                 auto title  = json["title"].asString().unwrapOr("Unknown Song");
                 auto artist = json["author"].asString().unwrapOr("Unknown Artist");
-                auto dlUrl  = json["url"].asString().unwrapOr("");
+                auto dlUrl  = urlEncode(json["url"].asString().unwrapOr(""));
+
+                if (dlUrl.empty()) return;
 
                 s_ngDone.insert(songID);
 
-                // Feed boomlings-format response into GD's own parser
+                // Correct GD song response format:
+                // Key 1  = song ID
+                // Key 2  = song name
+                // Key 3  = artist ID (0 = unknown)
+                // Key 4  = artist name
+                // Key 5  = file size MB
+                // Key 6  = YouTube video ID
+                // Key 7  = YouTube channel URL
+                // Key 8  = isVerified (1 = artist is NG-scouted / whitelisted)
+                // Key 10 = download URL (percent-encoded mp3 link)
                 auto fakeResponse = fmt::format(
-                    "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~6~|~~|~7~|~~|~10~|~{}",
+                    "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~6~|~~|~7~|~~|~8~|~1~|~10~|~{}",
                     songID, title, artist, dlUrl
                 );
-                this->onGetSongInfoCompleted(std::to_string(songID), fakeResponse);
+
+                auto capturedID  = std::to_string(songID);
+                auto capturedRes = fakeResponse;
+
+                // queueInMainThread — async callbacks may fire on worker
+                // threads on Android; all GD calls must be on main thread
+                Loader::get()->queueInMainThread([this, capturedID, capturedRes]() {
+                    // Call base class directly to avoid vtable re-entry crash
+                    MusicDownloadManager::onGetSongInfoCompleted(capturedID, capturedRes);
+                });
+
+            } else if (e->isCancelled()) {
+                s_ngInFlight.erase(songID);
             }
+        });
+
+        auto req = web::WebRequest();
+        m_fields->m_listener.setFilter(
+            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID))
         );
     }
 };
