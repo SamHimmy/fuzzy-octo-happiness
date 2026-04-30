@@ -25,13 +25,8 @@ static std::string urlEncode(std::string const& s) {
     return out;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hook: MusicDownloadManager
-// Exact pattern from https://docs.geode-sdk.org/tutorials/fetch/
-// ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    // Docs: use TaskHolder<web::WebResponse> inside Fields
     struct Fields {
         async::TaskHolder<web::WebResponse> m_listener;
     };
@@ -50,46 +45,46 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
         s_ngInFlight.insert(songID);
 
         auto req = web::WebRequest();
-
-        // Docs: spawn(future, callback) — callback called on main thread
         m_fields->m_listener.spawn(
             req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID)),
-            [this, songID](web::WebResponse res) {
-                s_ngInFlight.erase(songID);
+            [songID](web::WebResponse res) {
+                // Queue ALL GD interaction on main thread to prevent crashes
+                Loader::get()->queueInMainThread([songID, res = std::move(res)]() mutable {
+                    s_ngInFlight.erase(songID);
 
-                if (!res.ok()) return;
-                if (this->getSongInfoObject(songID)) return;
+                    if (!res.ok()) return;
 
-                auto jsonResult = res.json();
-                if (jsonResult.isErr()) return;
+                    auto* mdm = MusicDownloadManager::sharedState();
+                    if (mdm->getSongInfoObject(songID)) return;
 
-                auto const& json = jsonResult.unwrap();
-                auto title  = json["title"].asString().unwrapOr("Unknown Song");
-                auto artist = json["author"].asString().unwrapOr("Unknown Artist");
-                auto dlUrl  = urlEncode(json["url"].asString().unwrapOr(""));
+                    auto jsonResult = res.json();
+                    if (jsonResult.isErr()) return;
 
-                if (dlUrl.empty()) return;
-                s_ngDone.insert(songID);
+                    auto const& json = jsonResult.unwrap();
+                    auto title  = json["title"].asString().unwrapOr("Unknown Song");
+                    auto artist = json["author"].asString().unwrapOr("Unknown Artist");
+                    auto dlUrl  = urlEncode(json["url"].asString().unwrapOr(""));
 
-                // Key 8 = isVerified (artist is NG-scouted / whitelisted)
-                auto fakeResponse = fmt::format(
-                    "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~"
-                    "6~|~~|~7~|~~|~8~|~1~|~10~|~{}",
-                    songID, title, artist, dlUrl
-                );
+                    if (dlUrl.empty()) return;
+                    s_ngDone.insert(songID);
 
-                // Call base class directly to avoid vtable re-entry crash
-                MusicDownloadManager::onGetSongInfoCompleted(
-                    std::to_string(songID), fakeResponse
-                );
+                    // Key 8 = isVerified (artist is NG-scouted / whitelisted)
+                    auto fakeResponse = fmt::format(
+                        "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~"
+                        "6~|~~|~7~|~~|~8~|~1~|~10~|~{}",
+                        songID, title, artist, dlUrl
+                    );
+
+                    // Call base class directly — avoids vtable re-entry
+                    MusicDownloadManager::onGetSongInfoCompleted(
+                        std::to_string(songID), fakeResponse
+                    );
+                });
             }
         );
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hook: CustomSongWidget
-// ─────────────────────────────────────────────────────────────────────────────
 class $modify(CustomSongWidget) {
     bool init(SongInfoObject* songInfo, CustomSongDelegate* delegate,
               bool showSongSelect, bool showPlayMusic, bool showUseButton,
@@ -102,9 +97,6 @@ class $modify(CustomSongWidget) {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hook: LevelEditorLayer
-// ─────────────────────────────────────────────────────────────────────────────
 class $modify(LevelEditorLayer) {
     bool init(GJGameLevel* level, bool unk) {
         if (level && level->m_songID != 0) {
@@ -116,9 +108,6 @@ class $modify(LevelEditorLayer) {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hook: EditLevelLayer
-// ─────────────────────────────────────────────────────────────────────────────
 class $modify(EditLevelLayer) {
     bool init(GJGameLevel* level) {
         if (level && level->m_songID != 0) {
