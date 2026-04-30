@@ -12,7 +12,6 @@ using namespace geode::prelude;
 static std::unordered_set<int> s_ngInFlight;
 static std::unordered_set<int> s_ngDone;
 
-// Percent-encode a URL string so GD's parser handles it correctly
 static std::string urlEncode(std::string const& s) {
     std::string out;
     for (unsigned char c : s) {
@@ -26,15 +25,13 @@ static std::string urlEncode(std::string const& s) {
     return out;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hook: MusicDownloadManager
-// ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    // web::WebTask alias was removed in the nightly SDK.
-    // Use the underlying type directly: Task<web::WebResponse, web::WebProgress>
     struct Fields {
-        EventListener<Task<web::WebResponse, web::WebProgress>> m_listener;
+        // Fully-qualified — 'using namespace geode::prelude' is NOT in scope here
+        geode::EventListener<
+            geode::Task<geode::utils::web::WebResponse, geode::utils::web::WebProgress>
+        > m_listener;
     };
 
     bool isVerifiedSong(int songID)                    { return true; }
@@ -50,6 +47,7 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
         s_ngInFlight.insert(songID);
 
+        // Inside method bodies, 'using namespace geode::prelude' IS in scope
         m_fields->m_listener.bind(
             [this, songID](Task<web::WebResponse, web::WebProgress>::Event* e) {
                 if (web::WebResponse* res = e->getValue()) {
@@ -67,10 +65,9 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
                     auto dlUrl  = urlEncode(json["url"].asString().unwrapOr(""));
 
                     if (dlUrl.empty()) return;
-
                     s_ngDone.insert(songID);
 
-                    // GD song response format (key 8 = isVerified/whitelisted)
+                    // Key 8 = isVerified (artist is NG-scouted / whitelisted)
                     auto fakeResponse = fmt::format(
                         "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~"
                         "6~|~~|~7~|~~|~8~|~1~|~10~|~{}",
@@ -80,13 +77,8 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
                     auto capturedID  = std::to_string(songID);
                     auto capturedRes = fakeResponse;
 
-                    // Must run on main thread — async callbacks fire on worker
-                    // threads on Android; GD calls crash off main thread
                     Loader::get()->queueInMainThread([this, capturedID, capturedRes]() {
-                        // Call base class directly to avoid vtable re-entry
-                        MusicDownloadManager::onGetSongInfoCompleted(
-                            capturedID, capturedRes
-                        );
+                        MusicDownloadManager::onGetSongInfoCompleted(capturedID, capturedRes);
                     });
 
                 } else if (e->isCancelled()) {
@@ -97,16 +89,11 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
         auto req = web::WebRequest();
         m_fields->m_listener.setFilter(
-            req.get(fmt::format(
-                "https://www.newgrounds.com/audio/load/{}", songID
-            ))
+            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID))
         );
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hook: CustomSongWidget
-// ─────────────────────────────────────────────────────────────────────────────
 class $modify(CustomSongWidget) {
     bool init(SongInfoObject* songInfo, CustomSongDelegate* delegate,
               bool showSongSelect, bool showPlayMusic, bool showUseButton,
@@ -119,9 +106,6 @@ class $modify(CustomSongWidget) {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hook: LevelEditorLayer
-// ─────────────────────────────────────────────────────────────────────────────
 class $modify(LevelEditorLayer) {
     bool init(GJGameLevel* level, bool unk) {
         if (level && level->m_songID != 0) {
@@ -133,9 +117,6 @@ class $modify(LevelEditorLayer) {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hook: EditLevelLayer
-// ─────────────────────────────────────────────────────────────────────────────
 class $modify(EditLevelLayer) {
     bool init(GJGameLevel* level) {
         if (level && level->m_songID != 0) {
