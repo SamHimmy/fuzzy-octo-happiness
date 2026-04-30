@@ -1,6 +1,3 @@
-// Exact API from https://docs.geode-sdk.org/tutorials/fetch/
-// EventListener<web::WebTask> with .bind() then .setFilter()
-
 #include <Geode/Geode.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/loader/Event.hpp>
@@ -15,12 +12,12 @@ using namespace geode::prelude;
 static std::unordered_set<int> s_ngInFlight;
 static std::unordered_set<int> s_ngDone;
 
-// Percent-encode a URL so GD's parser handles it correctly
+// Percent-encode a URL string so GD's parser handles it correctly
 static std::string urlEncode(std::string const& s) {
     std::string out;
     for (unsigned char c : s) {
-        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' ||
-            c == ':' || c == '/' || c == '%' || c == '?' || c == '=') {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~'
+            || c == ':' || c == '/' || c == '%' || c == '?' || c == '=') {
             out += (char)c;
         } else {
             out += fmt::format("%{:02X}", c);
@@ -34,12 +31,12 @@ static std::string urlEncode(std::string const& s) {
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
-    // Exact pattern from official docs
+    // web::WebTask alias was removed in the nightly SDK.
+    // Use the underlying type directly: Task<web::WebResponse, web::WebProgress>
     struct Fields {
-        EventListener<web::WebTask> m_listener;
+        EventListener<Task<web::WebResponse, web::WebProgress>> m_listener;
     };
 
-    // ── Whitelist bypass ─────────────────────────────────────────────────────
     bool isVerifiedSong(int songID)                    { return true; }
     bool isSongVerified(int songID, bool includeLocal) { return true; }
     bool isMusicAllowed(int songID)                    { return true; }
@@ -53,58 +50,56 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
         s_ngInFlight.insert(songID);
 
-        m_fields->m_listener.bind([this, songID](web::WebTask::Event* e) {
-            if (web::WebResponse* res = e->getValue()) {
-                s_ngInFlight.erase(songID);
+        m_fields->m_listener.bind(
+            [this, songID](Task<web::WebResponse, web::WebProgress>::Event* e) {
+                if (web::WebResponse* res = e->getValue()) {
+                    s_ngInFlight.erase(songID);
 
-                if (!res->ok()) return;
-                if (this->getSongInfoObject(songID)) return;
+                    if (!res->ok()) return;
+                    if (this->getSongInfoObject(songID)) return;
 
-                auto jsonResult = res->json();
-                if (jsonResult.isErr()) return;
+                    auto jsonResult = res->json();
+                    if (jsonResult.isErr()) return;
 
-                auto const& json = jsonResult.unwrap();
-                auto title  = json["title"].asString().unwrapOr("Unknown Song");
-                auto artist = json["author"].asString().unwrapOr("Unknown Artist");
-                auto dlUrl  = urlEncode(json["url"].asString().unwrapOr(""));
+                    auto const& json = jsonResult.unwrap();
+                    auto title  = json["title"].asString().unwrapOr("Unknown Song");
+                    auto artist = json["author"].asString().unwrapOr("Unknown Artist");
+                    auto dlUrl  = urlEncode(json["url"].asString().unwrapOr(""));
 
-                if (dlUrl.empty()) return;
+                    if (dlUrl.empty()) return;
 
-                s_ngDone.insert(songID);
+                    s_ngDone.insert(songID);
 
-                // Correct GD song response format:
-                // Key 1  = song ID
-                // Key 2  = song name
-                // Key 3  = artist ID (0 = unknown)
-                // Key 4  = artist name
-                // Key 5  = file size MB
-                // Key 6  = YouTube video ID
-                // Key 7  = YouTube channel URL
-                // Key 8  = isVerified (1 = artist is NG-scouted / whitelisted)
-                // Key 10 = download URL (percent-encoded mp3 link)
-                auto fakeResponse = fmt::format(
-                    "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~6~|~~|~7~|~~|~8~|~1~|~10~|~{}",
-                    songID, title, artist, dlUrl
-                );
+                    // GD song response format (key 8 = isVerified/whitelisted)
+                    auto fakeResponse = fmt::format(
+                        "1~|~{}~|~2~|~{}~|~3~|~0~|~4~|~{}~|~5~|~0~|~"
+                        "6~|~~|~7~|~~|~8~|~1~|~10~|~{}",
+                        songID, title, artist, dlUrl
+                    );
 
-                auto capturedID  = std::to_string(songID);
-                auto capturedRes = fakeResponse;
+                    auto capturedID  = std::to_string(songID);
+                    auto capturedRes = fakeResponse;
 
-                // queueInMainThread — async callbacks may fire on worker
-                // threads on Android; all GD calls must be on main thread
-                Loader::get()->queueInMainThread([this, capturedID, capturedRes]() {
-                    // Call base class directly to avoid vtable re-entry crash
-                    MusicDownloadManager::onGetSongInfoCompleted(capturedID, capturedRes);
-                });
+                    // Must run on main thread — async callbacks fire on worker
+                    // threads on Android; GD calls crash off main thread
+                    Loader::get()->queueInMainThread([this, capturedID, capturedRes]() {
+                        // Call base class directly to avoid vtable re-entry
+                        MusicDownloadManager::onGetSongInfoCompleted(
+                            capturedID, capturedRes
+                        );
+                    });
 
-            } else if (e->isCancelled()) {
-                s_ngInFlight.erase(songID);
+                } else if (e->isCancelled()) {
+                    s_ngInFlight.erase(songID);
+                }
             }
-        });
+        );
 
         auto req = web::WebRequest();
         m_fields->m_listener.setFilter(
-            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID))
+            req.get(fmt::format(
+                "https://www.newgrounds.com/audio/load/{}", songID
+            ))
         );
     }
 };
