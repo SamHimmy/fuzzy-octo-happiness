@@ -6,16 +6,9 @@
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/modify/EditLevelLayer.hpp>
 #include <unordered_set>
-#include <map>
-#include <memory>
 
 using namespace geode::prelude;
 
-// All statics at file scope — 'using namespace geode::prelude' IS active here.
-// EventListener cannot live inside $modify Fields because the $modify macro
-// creates a template context where name lookup fails for geode:: types.
-using WebListener = EventListener<Task<web::WebResponse, web::WebProgress>>;
-static std::map<int, std::unique_ptr<WebListener>> s_listeners;
 static std::unordered_set<int> s_ngInFlight;
 static std::unordered_set<int> s_ngDone;
 
@@ -34,8 +27,14 @@ static std::string urlEncode(std::string const& s) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook: MusicDownloadManager
+// Exact pattern from https://docs.geode-sdk.org/tutorials/fetch/
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(SongUnlockerMDM, MusicDownloadManager) {
+
+    // Docs: use TaskHolder<web::WebResponse> inside Fields
+    struct Fields {
+        async::TaskHolder<web::WebResponse> m_listener;
+    };
 
     bool isVerifiedSong(int songID)                    { return true; }
     bool isSongVerified(int songID, bool includeLocal) { return true; }
@@ -50,16 +49,18 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
 
         s_ngInFlight.insert(songID);
 
-        auto listener = std::make_unique<WebListener>();
-        listener->bind([this, songID](Task<web::WebResponse, web::WebProgress>::Event* e) {
-            if (web::WebResponse* res = e->getValue()) {
-                s_ngInFlight.erase(songID);
-                s_listeners.erase(songID);
+        auto req = web::WebRequest();
 
-                if (!res->ok()) return;
+        // Docs: spawn(future, callback) — callback called on main thread
+        m_fields->m_listener.spawn(
+            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID)),
+            [this, songID](web::WebResponse res) {
+                s_ngInFlight.erase(songID);
+
+                if (!res.ok()) return;
                 if (this->getSongInfoObject(songID)) return;
 
-                auto jsonResult = res->json();
+                auto jsonResult = res.json();
                 if (jsonResult.isErr()) return;
 
                 auto const& json = jsonResult.unwrap();
@@ -77,26 +78,12 @@ class $modify(SongUnlockerMDM, MusicDownloadManager) {
                     songID, title, artist, dlUrl
                 );
 
-                auto capturedID  = std::to_string(songID);
-                auto capturedRes = fakeResponse;
-
-                // Must be on main thread — GD calls crash off main thread on Android
-                Loader::get()->queueInMainThread([this, capturedID, capturedRes]() {
-                    // Call base class directly — avoids vtable re-entry crash
-                    MusicDownloadManager::onGetSongInfoCompleted(capturedID, capturedRes);
-                });
-
-            } else if (e->isCancelled()) {
-                s_ngInFlight.erase(songID);
-                s_listeners.erase(songID);
+                // Call base class directly to avoid vtable re-entry crash
+                MusicDownloadManager::onGetSongInfoCompleted(
+                    std::to_string(songID), fakeResponse
+                );
             }
-        });
-
-        auto req = web::WebRequest();
-        listener->setFilter(
-            req.get(fmt::format("https://www.newgrounds.com/audio/load/{}", songID))
         );
-        s_listeners[songID] = std::move(listener);
     }
 };
 
